@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 
+set -o pipefail
+
 CURRENT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 source "$CURRENT_DIR/variables.sh"
@@ -238,14 +240,46 @@ remove_old_backups() {
 save_all() {
 	local resurrect_file_path="$(resurrect_file_path)"
 	local last_resurrect_file="$(last_resurrect_file)"
+	local base_resurrect_file_path="$resurrect_file_path"
+	local suffix=1
+	local capture_file
 	mkdir -p "$(resurrect_dir)"
-	fetch_and_dump_grouped_sessions > "$resurrect_file_path"
-	dump_panes   >> "$resurrect_file_path"
-	dump_windows >> "$resurrect_file_path"
-	dump_state   >> "$resurrect_file_path"
+	while [ -e "$resurrect_file_path" ] || [ -L "$resurrect_file_path" ]; do
+		resurrect_file_path="${base_resurrect_file_path%.$RESURRECT_FILE_EXTENSION}_${suffix}.${RESURRECT_FILE_EXTENSION}"
+		suffix=$((suffix + 1))
+	done
+	if ! capture_file="$(mktemp "${resurrect_file_path}.tmp.XXXXXX")"; then
+		echo "Tmux environment save failed; previous save kept." >&2
+		return 1
+	fi
+	if ! fetch_and_dump_grouped_sessions > "$capture_file" ||
+		! dump_panes >> "$capture_file" ||
+		! dump_windows >> "$capture_file" ||
+		! dump_state >> "$capture_file"; then
+		rm -f "$capture_file"
+		echo "Tmux environment save failed; previous save kept." >&2
+		return 1
+	fi
+	if ! awk -F '\t' '$1 == "pane" { found = 1 } END { exit !found }' "$capture_file" ||
+		! awk -F '\t' '$1 == "window" { found = 1 } END { exit !found }' "$capture_file"; then
+		rm -f "$capture_file"
+		echo "Tmux environment save produced no panes or windows; previous save kept." >&2
+		return 1
+	fi
+	if ! mv "$capture_file" "$resurrect_file_path"; then
+		rm -f "$capture_file"
+		echo "Tmux environment save failed; previous save kept." >&2
+		return 1
+	fi
 	execute_hook "post-save-layout" "$resurrect_file_path"
 	if files_differ "$resurrect_file_path" "$last_resurrect_file"; then
-		ln -fs "$(basename "$resurrect_file_path")" "$last_resurrect_file"
+		local last_link_tmp="${last_resurrect_file}.tmp.$$"
+		if ! ln -sfn "$(basename "$resurrect_file_path")" "$last_link_tmp" ||
+			! mv -f "$last_link_tmp" "$last_resurrect_file"; then
+			rm -f "$last_link_tmp" "$resurrect_file_path"
+			echo "Tmux environment save failed; previous save kept." >&2
+			return 1
+		fi
 	else
 		rm "$resurrect_file_path"
 	fi
@@ -268,10 +302,16 @@ main() {
 		if show_output; then
 			start_spinner "Saving..." "Tmux environment saved!"
 		fi
-		save_all
-		if show_output; then
-			stop_spinner
-			display_message "Tmux environment saved!"
+		if save_all; then
+			if show_output; then
+				stop_spinner
+				display_message "Tmux environment saved!"
+			fi
+		else
+			if show_output; then
+				stop_spinner
+			fi
+			return 1
 		fi
 	fi
 }

@@ -276,11 +276,13 @@ restore_all_panes() {
 
 handle_session_0() {
 	if is_restoring_from_scratch && ! has_restored_session_0; then
-		local current_session="$(tmux display -p "#{client_session}")"
-		if [ "$current_session" == "0" ]; then
-			tmux switch-client -n
+		if tmux list-sessions -F "#{session_name}" 2>/dev/null | \grep -qv '^0$'; then
+			local current_session="$(tmux display -p "#{client_session}")"
+			if [ "$current_session" == "0" ]; then
+				tmux switch-client -n
+			fi
+			tmux kill-session -t "0"
 		fi
-		tmux kill-session -t "0"
 	fi
 }
 
